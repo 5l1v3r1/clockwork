@@ -3,6 +3,7 @@ package clockwork
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/unixpickle/autofunc"
 	"github.com/unixpickle/num-analysis/linalg"
@@ -45,6 +46,7 @@ type Block struct {
 	squasher          neuralnet.Network `json:"-"`
 	frequencies       []int
 	initState         *autofunc.Variable
+	fullyConnected    bool
 }
 
 // DeserializeBlock deserializes a block.
@@ -60,6 +62,69 @@ func DeserializeBlock(d []byte) (*Block, error) {
 		return nil, err
 	}
 	return &res, nil
+}
+
+// NewBlock creates a traditional clockwork RNN with the
+// specified frequencies (which needn't be sorted).
+func NewBlock(inSize int, freqs []int, stateSizes []int) *Block {
+	freqs, stateSizes = sortFreqs(freqs, stateSizes)
+	res := &Block{
+		stateTransformers: make(denseList, len(freqs)),
+		inputTransformers: make(denseList, len(freqs)),
+	}
+	var totalState int
+	for i := len(freqs) - 1; i >= 0; i-- {
+		size := stateSizes[i]
+		totalState += size
+		trans := neuralnet.NewDenseLayer(totalState, size)
+		inTrans := neuralnet.NewDenseLayer(inSize, size)
+		res.stateTransformers[i] = trans
+		res.inputTransformers[i] = inTrans
+	}
+	res.squasher = neuralnet.Network{
+		&neuralnet.HyperbolicTangent{},
+	}
+	res.frequencies = freqs
+	res.initState = &autofunc.Variable{
+		Vector: make(linalg.Vector, totalState),
+	}
+	return res
+}
+
+// NewBlockFC creates a fully-connected clockwork RNN,
+// in which higher and lower frequency blocks pass info
+// back and forth.
+func NewBlockFC(inSize int, freqs []int, stateSizes []int) *Block {
+	freqs, stateSizes = sortFreqs(freqs, stateSizes)
+	res := &Block{
+		stateTransformers: make(denseList, len(freqs)),
+		inputTransformers: make(denseList, len(freqs)),
+	}
+	var totalState int
+	for _, x := range stateSizes {
+		totalState += x
+	}
+	for i, state := range stateSizes {
+		st := neuralnet.NewDenseLayer(totalState, state)
+		res.stateTransformers[i] = st
+		it := neuralnet.NewDenseLayer(inSize, state)
+		res.inputTransformers[i] = it
+	}
+	res.squasher = neuralnet.Network{
+		&neuralnet.HyperbolicTangent{},
+	}
+	res.frequencies = freqs
+	res.initState = &autofunc.Variable{
+		Vector: make(linalg.Vector, totalState),
+	}
+	res.fullyConnected = true
+	return res
+}
+
+// Frequencies returns the frequencies of the internal
+// blocks, sorted from lowest to highest.
+func (b *Block) Frequencies() []int {
+	return append([]int{}, b.frequencies...)
 }
 
 // Parameters returns the parameters of the CWRNN.
@@ -122,4 +187,31 @@ func (d denseList) Serialize() ([]byte, error) {
 		s[i] = x
 	}
 	return serializer.SerializeSlice(s)
+}
+
+type freqSorter struct {
+	freqs []int
+	sizes []int
+}
+
+func sortFreqs(freqs, sizes []int) (newFreqs, newSizes []int) {
+	s := freqSorter{
+		freqs: append([]int{}, freqs...),
+		sizes: append([]int{}, sizes...),
+	}
+	sort.Sort(&s)
+	return s.freqs, s.sizes
+}
+
+func (f *freqSorter) Len() int {
+	return len(f.freqs)
+}
+
+func (f *freqSorter) Swap(i, j int) {
+	f.freqs[i], f.freqs[j] = f.freqs[j], f.freqs[i]
+	f.sizes[i], f.sizes[j] = f.sizes[j], f.sizes[i]
+}
+
+func (f *freqSorter) Less(i, j int) bool {
+	return f.freqs[i] < f.freqs[j]
 }

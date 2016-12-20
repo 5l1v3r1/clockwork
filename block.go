@@ -185,10 +185,46 @@ func (b *Block) ApplyBlock(s []rnn.State, in []autofunc.Result) rnn.BlockResult 
 }
 
 // ApplyBlockR is like ApplyBlock but for RResults.
-func (b *Block) ApplyBlockR(v autofunc.RVector, s []rnn.RState,
+func (b *Block) ApplyBlockR(rv autofunc.RVector, s []rnn.RState,
 	in []autofunc.RResult) rnn.BlockRResult {
-	// TODO: this.
-	return nil
+	var statePool []*autofunc.Variable
+	var stateRes []autofunc.RResult
+	for _, state := range s {
+		stateObj := state.(*blockRState)
+		p := &autofunc.Variable{Vector: stateObj.states}
+		statePool = append(statePool, p)
+		stateRes = append(stateRes, &autofunc.RVariable{
+			Variable:   p,
+			ROutputVec: stateObj.statesR,
+		})
+	}
+
+	newStates := make([]autofunc.RResult, len(b.metadata.Frequencies))
+	for i := range b.metadata.Frequencies {
+		newStates[i] = b.applySubBlockR(rv, i, s, stateRes, in)
+	}
+	joinedRes := b.weaveStatesR(len(in), newStates)
+
+	splitOut := autofunc.SplitR(len(in), joinedRes)
+	var outVecs, outVecsR []linalg.Vector
+	var outStates []rnn.RState
+	for i, x := range splitOut {
+		outVecs = append(outVecs, x.Output())
+		outVecsR = append(outVecs, x.ROutput())
+		outStates = append(outStates, &blockRState{
+			states:   x.Output(),
+			statesR:  x.ROutput(),
+			timestep: s[i].(*blockState).timestep + 1,
+		})
+	}
+
+	return &blockRResult{
+		StatePool: statePool,
+		Results:   joinedRes,
+		OutVecs:   outVecs,
+		ROutVecs:  outVecsR,
+		OutStates: outStates,
+	}
 }
 
 // Frequencies returns the frequencies of the internal
@@ -267,6 +303,53 @@ func (b *Block) applySubBlock(subIdx int, inState []rnn.State, pool []autofunc.R
 	)
 }
 
+func (b *Block) applySubBlockR(rv autofunc.RVector, subIdx int, inState []rnn.RState,
+	pool []autofunc.RResult, in []autofunc.RResult) autofunc.RResult {
+	stateIdx := 0
+	for i := 0; i < subIdx; i++ {
+		stateIdx += b.stateTransformers[i].Weights.Rows
+	}
+	stateSize := b.stateTransformers[subIdx].Weights.Rows
+	freq := b.metadata.Frequencies[subIdx]
+
+	var transformStates []autofunc.RResult
+	var transformIns []autofunc.RResult
+	for i, s := range inState {
+		if s.(*blockRState).timestep%freq == 0 {
+			transformIns = append(transformIns, in[i])
+			if b.metadata.FullyConnected {
+				transformStates = append(transformStates, pool[i])
+			} else {
+				inSize := b.stateTransformers[subIdx].Weights.Cols
+				slowerOrSame := autofunc.SliceR(pool[i], stateIdx, inSize)
+				transformStates = append(transformStates, slowerOrSame)
+			}
+		}
+	}
+
+	if len(transformStates) == 0 {
+		var prevStates []autofunc.RResult
+		for _, x := range pool {
+			p := autofunc.SliceR(x, stateIdx, stateSize)
+			prevStates = append(prevStates, p)
+		}
+		return autofunc.ConcatR(prevStates...)
+	} else if len(transformStates) != len(in) {
+		panic("input states are out of sync")
+	}
+
+	transformState := autofunc.ConcatR(transformStates...)
+	transformIn := autofunc.ConcatR(transformIns...)
+
+	return b.squasher.ApplyR(
+		rv,
+		autofunc.AddR(
+			b.stateTransformers[subIdx].BatchR(rv, transformState, len(transformIns)),
+			b.inputTransformers[subIdx].BatchR(rv, transformIn, len(transformIns)),
+		),
+	)
+}
+
 func (b *Block) weaveStates(numIn int, subStates []autofunc.Result) autofunc.Result {
 	return autofunc.PoolAll(subStates, func(subStates []autofunc.Result) autofunc.Result {
 		splitSub := make([][]autofunc.Result, len(subStates))
@@ -280,6 +363,22 @@ func (b *Block) weaveStates(numIn int, subStates []autofunc.Result) autofunc.Res
 			}
 		}
 		return autofunc.Concat(ordered...)
+	})
+}
+
+func (b *Block) weaveStatesR(numIn int, subStates []autofunc.RResult) autofunc.RResult {
+	return autofunc.PoolAllR(subStates, func(subStates []autofunc.RResult) autofunc.RResult {
+		splitSub := make([][]autofunc.RResult, len(subStates))
+		for i, s := range subStates {
+			splitSub[i] = autofunc.SplitR(numIn, s)
+		}
+		var ordered []autofunc.RResult
+		for i := 0; i < numIn; i++ {
+			for _, x := range splitSub {
+				ordered = append(ordered, x[i])
+			}
+		}
+		return autofunc.ConcatR(ordered...)
 	})
 }
 
@@ -315,6 +414,51 @@ func (b *blockResult) PropagateGradient(u []linalg.Vector, s []rnn.StateGrad,
 	}
 	return rnn.PropagateVecStatePool(g, b.StatePool, func() {
 		b.Results.PropagateGradient(outUp, g)
+	})
+}
+
+type blockRResult struct {
+	StatePool []*autofunc.Variable
+	Results   autofunc.RResult
+	OutVecs   []linalg.Vector
+	ROutVecs  []linalg.Vector
+	OutStates []rnn.RState
+}
+
+func (b *blockRResult) Outputs() []linalg.Vector {
+	return b.OutVecs
+}
+
+func (b *blockRResult) ROutputs() []linalg.Vector {
+	return b.ROutVecs
+}
+
+func (b *blockRResult) RStates() []rnn.RState {
+	return b.OutStates
+}
+
+func (b *blockRResult) PropagateRGradient(u, uR []linalg.Vector, s []rnn.RStateGrad,
+	rg autofunc.RGradient, g autofunc.Gradient) []rnn.RStateGrad {
+	var outUp, outUpR linalg.Vector
+	for i := range b.OutStates {
+		var vec, vecR linalg.Vector
+		if u != nil {
+			vec = u[i].Copy()
+			vecR = uR[i].Copy()
+		} else {
+			vec = make(linalg.Vector, len(b.OutVecs[i]))
+			vecR = make(linalg.Vector, len(b.OutVecs[i]))
+		}
+		if s != nil && s[i] != nil {
+			vrsg := s[i].(rnn.VecRStateGrad)
+			vec.Add(vrsg.State)
+			vecR.Add(vrsg.RState)
+		}
+		outUp = append(outUp, vec...)
+		outUpR = append(outUpR, vecR...)
+	}
+	return rnn.PropagateVecRStatePool(rg, g, b.StatePool, func() {
+		b.Results.PropagateRGradient(outUp, outUpR, rg, g)
 	})
 }
 

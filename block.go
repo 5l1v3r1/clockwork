@@ -30,15 +30,6 @@ type blockRState struct {
 	timestep int
 }
 
-type blockStateGrad struct {
-	states linalg.Vector
-}
-
-type blockRStateGrad struct {
-	states  linalg.Vector
-	statesR linalg.Vector
-}
-
 // Block is an rnn.Block which implements the traditional
 // Clockwork RNN architecture.
 type Block struct {
@@ -142,22 +133,13 @@ func (b *Block) StartRState(rv autofunc.RVector) rnn.RState {
 
 // PropagateStart propagates through the start state.
 func (b *Block) PropagateStart(s []rnn.State, u []rnn.StateGrad, g autofunc.Gradient) {
-	for _, sg := range u {
-		grad := sg.(*blockStateGrad)
-		b.initState.PropagateGradient(grad.states, g)
-	}
+	rnn.PropagateVarState(b.initState, u, g)
 }
 
 // PropagateStartR propagates through the start state.
 func (b *Block) PropagateStartR(s []rnn.RState, u []rnn.RStateGrad,
 	rg autofunc.RGradient, g autofunc.Gradient) {
-	rv := &autofunc.RVariable{Variable: b.initState}
-	for _, sg := range u {
-		grad := sg.(*blockRStateGrad)
-		up := grad.states
-		upR := grad.statesR
-		rv.PropagateRGradient(up, upR, rg, g)
-	}
+	rnn.PropagateVarStateR(b.initState, u, rg, g)
 }
 
 // Frequencies returns the frequencies of the internal
@@ -192,7 +174,7 @@ func (b *Block) Serialize() ([]byte, error) {
 
 type blockResult struct {
 	StatePool []*autofunc.Variable
-	Results   []autofunc.Result
+	Results   autofunc.Result
 	OutVecs   []linalg.Vector
 	OutStates []rnn.State
 }
@@ -203,6 +185,26 @@ func (b *blockResult) Outputs() []linalg.Vector {
 
 func (b *blockResult) States() []rnn.State {
 	return b.OutStates
+}
+
+func (b *blockResult) PropagateGradient(u []linalg.Vector, s []rnn.StateGrad,
+	g autofunc.Gradient) []rnn.StateGrad {
+	var outUp linalg.Vector
+	for i := range b.OutStates {
+		var vec linalg.Vector
+		if u != nil {
+			vec = u[i].Copy()
+		} else {
+			vec = make(linalg.Vector, len(b.OutVecs[i]))
+		}
+		if s != nil && s[i] != nil {
+			vec.Add(linalg.Vector(s[i].(rnn.VecStateGrad)))
+		}
+		outUp = append(outUp, vec...)
+	}
+	return rnn.PropagateVecStatePool(g, b.StatePool, func() {
+		b.Results.PropagateGradient(outUp, g)
+	})
 }
 
 type denseList []*neuralnet.DenseLayer

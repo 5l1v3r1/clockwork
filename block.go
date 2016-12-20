@@ -227,6 +227,16 @@ func (b *Block) ApplyBlockR(rv autofunc.RVector, s []rnn.RState,
 	}
 }
 
+// OutSize returns the total vector size of the block's
+// output vectors (the sum of the sub-block state sizes).
+func (b *Block) OutSize() int {
+	var sum int
+	for _, x := range b.inputTransformers {
+		sum += x.Weights.Rows
+	}
+	return sum
+}
+
 // Frequencies returns the frequencies of the internal
 // blocks, sorted from lowest to highest.
 func (b *Block) Frequencies() []int {

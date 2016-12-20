@@ -9,6 +9,7 @@ import (
 	"github.com/unixpickle/num-analysis/linalg"
 	"github.com/unixpickle/serializer"
 	"github.com/unixpickle/weakai/neuralnet"
+	"github.com/unixpickle/weakai/rnn"
 )
 
 func init() {
@@ -19,23 +20,23 @@ func init() {
 }
 
 type blockState struct {
-	subStates []linalg.Vector
-	timestep  int
+	states   linalg.Vector
+	timestep int
 }
 
 type blockRState struct {
-	subStates  []linalg.Vector
-	subStatesR []linalg.Vector
-	timestep   int
+	states   linalg.Vector
+	statesR  linalg.Vector
+	timestep int
 }
 
 type blockStateGrad struct {
-	subStates []linalg.Vector
+	states linalg.Vector
 }
 
-type blockStateRGrad struct {
-	subStates  []linalg.Vector
-	subStatesR []linalg.Vector
+type blockRStateGrad struct {
+	states  linalg.Vector
+	statesR linalg.Vector
 }
 
 // Block is an rnn.Block which implements the traditional
@@ -121,6 +122,44 @@ func NewBlockFC(inSize int, freqs []int, stateSizes []int) *Block {
 	return res
 }
 
+// StartState returns the initial state.
+func (b *Block) StartState() rnn.State {
+	return &blockState{
+		timestep: 0,
+		states:   b.initState.Vector,
+	}
+}
+
+// StartRState returns the initial r-state.
+func (b *Block) StartRState(rv autofunc.RVector) rnn.RState {
+	v := autofunc.NewRVariable(b.initState, rv)
+	return &blockRState{
+		timestep: 0,
+		states:   v.Output(),
+		statesR:  v.ROutput(),
+	}
+}
+
+// PropagateStart propagates through the start state.
+func (b *Block) PropagateStart(s []rnn.State, u []rnn.StateGrad, g autofunc.Gradient) {
+	for _, sg := range u {
+		grad := sg.(*blockStateGrad)
+		b.initState.PropagateGradient(grad.states, g)
+	}
+}
+
+// PropagateStartR propagates through the start state.
+func (b *Block) PropagateStartR(s []rnn.RState, u []rnn.RStateGrad,
+	rg autofunc.RGradient, g autofunc.Gradient) {
+	rv := &autofunc.RVariable{Variable: b.initState}
+	for _, sg := range u {
+		grad := sg.(*blockRStateGrad)
+		up := grad.states
+		upR := grad.statesR
+		rv.PropagateRGradient(up, upR, rg, g)
+	}
+}
+
 // Frequencies returns the frequencies of the internal
 // blocks, sorted from lowest to highest.
 func (b *Block) Frequencies() []int {
@@ -149,6 +188,21 @@ func (b *Block) Serialize() ([]byte, error) {
 	}
 	return serializer.SerializeAny(b.stateTransformers, b.inputTransformers,
 		b.squasher, serializer.Bytes(jsonData))
+}
+
+type blockResult struct {
+	StatePool []*autofunc.Variable
+	Results   []autofunc.Result
+	OutVecs   []linalg.Vector
+	OutStates []rnn.State
+}
+
+func (b *blockResult) Outputs() []linalg.Vector {
+	return b.OutVecs
+}
+
+func (b *blockResult) States() []rnn.State {
+	return b.OutStates
 }
 
 type denseList []*neuralnet.DenseLayer

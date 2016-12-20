@@ -210,11 +210,11 @@ func (b *Block) ApplyBlockR(rv autofunc.RVector, s []rnn.RState,
 	var outStates []rnn.RState
 	for i, x := range splitOut {
 		outVecs = append(outVecs, x.Output())
-		outVecsR = append(outVecs, x.ROutput())
+		outVecsR = append(outVecsR, x.ROutput())
 		outStates = append(outStates, &blockRState{
 			states:   x.Output(),
 			statesR:  x.ROutput(),
-			timestep: s[i].(*blockState).timestep + 1,
+			timestep: s[i].(*blockRState).timestep + 1,
 		})
 	}
 
@@ -275,7 +275,7 @@ func (b *Block) applySubBlock(subIdx int, inState []rnn.State, pool []autofunc.R
 				transformStates = append(transformStates, pool[i])
 			} else {
 				inSize := b.stateTransformers[subIdx].Weights.Cols
-				slowerOrSame := autofunc.Slice(pool[i], stateIdx, inSize)
+				slowerOrSame := autofunc.Slice(pool[i], stateIdx, stateIdx+inSize)
 				transformStates = append(transformStates, slowerOrSame)
 			}
 		}
@@ -284,7 +284,7 @@ func (b *Block) applySubBlock(subIdx int, inState []rnn.State, pool []autofunc.R
 	if len(transformStates) == 0 {
 		var prevStates []autofunc.Result
 		for _, x := range pool {
-			p := autofunc.Slice(x, stateIdx, stateSize)
+			p := autofunc.Slice(x, stateIdx, stateIdx+stateSize)
 			prevStates = append(prevStates, p)
 		}
 		return autofunc.Concat(prevStates...)
@@ -321,7 +321,7 @@ func (b *Block) applySubBlockR(rv autofunc.RVector, subIdx int, inState []rnn.RS
 				transformStates = append(transformStates, pool[i])
 			} else {
 				inSize := b.stateTransformers[subIdx].Weights.Cols
-				slowerOrSame := autofunc.SliceR(pool[i], stateIdx, inSize)
+				slowerOrSame := autofunc.SliceR(pool[i], stateIdx, stateIdx+inSize)
 				transformStates = append(transformStates, slowerOrSame)
 			}
 		}
@@ -330,7 +330,7 @@ func (b *Block) applySubBlockR(rv autofunc.RVector, subIdx int, inState []rnn.RS
 	if len(transformStates) == 0 {
 		var prevStates []autofunc.RResult
 		for _, x := range pool {
-			p := autofunc.SliceR(x, stateIdx, stateSize)
+			p := autofunc.SliceR(x, stateIdx, stateIdx+stateSize)
 			prevStates = append(prevStates, p)
 		}
 		return autofunc.ConcatR(prevStates...)

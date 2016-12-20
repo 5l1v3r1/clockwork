@@ -145,6 +145,10 @@ func (b *Block) PropagateStartR(s []rnn.RState, u []rnn.RStateGrad,
 }
 
 // ApplyBlock applies the block.
+//
+// The input states must be in sync, meaning that they are
+// all from the same timestep mod the LCM of the
+// frequencies.
 func (b *Block) ApplyBlock(s []rnn.State, in []autofunc.Result) rnn.BlockResult {
 	var statePool []*autofunc.Variable
 	var stateRes []autofunc.Result
@@ -180,7 +184,7 @@ func (b *Block) ApplyBlock(s []rnn.State, in []autofunc.Result) rnn.BlockResult 
 	}
 }
 
-// ApplyBlockR applies the block.
+// ApplyBlockR is like ApplyBlock but for RResults.
 func (b *Block) ApplyBlockR(v autofunc.RVector, s []rnn.RState,
 	in []autofunc.RResult) rnn.BlockRResult {
 	// TODO: this.
@@ -248,38 +252,19 @@ func (b *Block) applySubBlock(subIdx int, inState []rnn.State, pool []autofunc.R
 			prevStates = append(prevStates, p)
 		}
 		return autofunc.Concat(prevStates...)
+	} else if len(transformStates) != len(in) {
+		panic("input states are out of sync")
 	}
 
 	transformState := autofunc.Concat(transformStates...)
 	transformIn := autofunc.Concat(transformIns...)
 
-	newStates := b.squasher.Apply(
+	return b.squasher.Apply(
 		autofunc.Add(
 			b.stateTransformers[subIdx].Batch(transformState, len(transformIns)),
 			b.inputTransformers[subIdx].Batch(transformIn, len(transformIns)),
 		),
 	)
-	if len(transformStates) == len(in) {
-		return newStates
-	}
-
-	// Only necessary if some input states were on different
-	// timesteps than others.
-	return autofunc.Pool(newStates, func(newStates autofunc.Result) autofunc.Result {
-		split := autofunc.Split(len(transformStates), newStates)
-		var res []autofunc.Result
-		var idx int
-		for i, s := range inState {
-			if s.(*blockState).timestep%freq == 0 {
-				res = append(res, split[idx])
-				idx++
-			} else {
-				p := autofunc.Slice(pool[i], stateIdx, stateSize)
-				res = append(res, p)
-			}
-		}
-		return autofunc.Concat(res...)
-	})
 }
 
 func (b *Block) weaveStates(numIn int, subStates []autofunc.Result) autofunc.Result {
